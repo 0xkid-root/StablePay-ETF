@@ -7,6 +7,8 @@ import { GradientButton } from "@/components/ui/gradient-button"
 import { PlusCircle } from "lucide-react"
 import { handleEmployeeRegistration } from "@/app/actions/employee-registration"
 import { useToast } from "@/components/ui/use-toast"
+import { ethers } from "ethers"
+import { useRouter } from "next/navigation"
 
 interface AddEmployeeModalProps {
   isOpen: boolean
@@ -22,6 +24,7 @@ interface AddEmployeeModalProps {
 
 export function AddEmployeeModal({ isOpen, onClose, onSubmit, isProcessing }: AddEmployeeModalProps) {
   const { toast } = useToast()
+  const router = useRouter()
   const [formData, setFormData] = useState({
     name: "",
     address: "",
@@ -30,12 +33,91 @@ export function AddEmployeeModal({ isOpen, onClose, onSubmit, isProcessing }: Ad
   })
 
   const handleSubmit = async () => {
-    console.log("address for here:", formData.address)
+    console.log("Employee address:", formData.address)
     if (!formData.name || !formData.address || !formData.amount) return
     
     try {
+      // Get the current wallet address (employer's address) from window.ethereum
+      let employerAddress = "";
+      if (!window.ethereum) {
+        throw new Error("MetaMask not detected. Please install MetaMask or another Web3 wallet");
+      }
+      
+      // Request account access
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      if (!accounts || accounts.length === 0) {
+        throw new Error("No accounts found. Please connect your wallet.");
+      }
+      
+      employerAddress = accounts[0];
+      console.log("Employer address (current wallet):", employerAddress);
+      
+      // Check if we're on a supported network
+      const provider = new ethers.providers.Web3Provider(window.ethereum);
+      const network = await provider.getNetwork();
+      console.log("Current network:", network);
+      
+      // List of supported networks
+      const supportedNetworks: Record<number, string> = {
+        1: 'Ethereum Mainnet',
+        5: 'Goerli Testnet',
+        11155111: 'Sepolia Testnet',
+        137: 'Polygon Mainnet',
+        80001: 'Mumbai Testnet',
+        50002: 'Foundry Local'
+      };
+      
+      // If not on a supported network, try to switch to Foundry Local
+      if (!supportedNetworks[network.chainId]) {
+        try {
+          await window.ethereum.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: '0xc352' }], // 0xc352 is hex for 50002
+          });
+          console.log("Switched to Foundry Local network");
+        } catch (switchError: any) {
+          // This error code indicates that the chain has not been added to MetaMask
+          if (switchError.code === 4902) {
+            try {
+              await window.ethereum.request({
+                method: 'wallet_addEthereumChain',
+                params: [
+                  {
+                    chainId: '0xc352', // 50002 in hex
+                    chainName: 'Foundry Local',
+                    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+                    rpcUrls: ['http://localhost:8545'],
+                    blockExplorerUrls: []
+                  }
+                ],
+              });
+              console.log("Added and switched to Foundry Local network");
+            } catch (addError: any) {
+              throw new Error(`Failed to add Foundry Local network: ${addError.message || 'Unknown error'}`);
+            }
+          } else {
+            throw new Error(`Failed to switch network: ${switchError.message}`);
+          }
+        }
+      }
+
+      // Check if the current address is registered as an employer in IndexedDB
+      const { employerDB } = await import('@/lib/db');
+      const employer = await employerDB.get(employerAddress);
+      
+      if (!employer) {
+        console.log('Current address is not registered as an employer in IndexedDB, registering now...');
+        // Auto-register the current address as an employer
+        await employerDB.add({
+          address: employerAddress,
+          name: 'Auto-registered Employer'
+        });
+        console.log('Successfully registered current address as an employer');
+      }
+      
+      // Pass the employer's address (current wallet) and employee data
       const result = await handleEmployeeRegistration(
-        formData.address, 
+        employerAddress, 
         formData
       )
       console.log("Registration result:", result)
@@ -52,6 +134,14 @@ export function AddEmployeeModal({ isOpen, onClose, onSubmit, isProcessing }: Ad
           title: "Success",
           description: "Employee registered successfully",
         })
+        
+        // Redirect to the employee dashboard
+        // We'll first close the modal, then redirect after a short delay
+        onClose()
+        setTimeout(() => {
+          // Redirect the newly registered employee to their dashboard
+          router.push(`/employee?address=${formData.address}`)
+        }, 1000) // 1 second delay to allow the toast to be visible
       } else {
         toast({
           variant: "destructive",
@@ -60,6 +150,7 @@ export function AddEmployeeModal({ isOpen, onClose, onSubmit, isProcessing }: Ad
         })
       }
     } catch (error: any) {
+      console.error("Employee registration error:", error);
       toast({
         variant: "destructive",
         title: "Error",

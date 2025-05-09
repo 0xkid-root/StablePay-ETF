@@ -7,7 +7,7 @@ import { initializeBlockchain } from './blockchainIntergation';
 // Types
 export interface RoleManagerContract extends Contract {
   registerAsEmployer(): Promise<ethers.ContractTransaction>;
-  registerAsEmployee(employer: string): Promise<ethers.ContractTransaction>;
+  registerAsEmployee(employer: string, overrides?: ethers.Overrides): Promise<ethers.ContractTransaction>;
   isEmployer(account: string): Promise<boolean>;
   isEmployee(account: string): Promise<boolean>;
   getEmployerOf(employee: string): Promise<string>;
@@ -16,6 +16,13 @@ export interface RoleManagerContract extends Contract {
   pause(): Promise<ethers.ContractTransaction>;
   unpause(): Promise<ethers.ContractTransaction>;
   hasRole(role: string, account: string): Promise<boolean>;
+  EMPLOYER_ROLE(): Promise<string>;
+  EMPLOYEE_ROLE(): Promise<string>;
+  signer: ethers.Signer;
+  estimateGas: {
+    registerAsEmployer(): Promise<ethers.BigNumber>;
+    registerAsEmployee(employer: string): Promise<ethers.BigNumber>;
+  };
 }
 
 // Role Manager Functions
@@ -39,6 +46,20 @@ export async function initializeRoleManager(): Promise<RoleManagerContract> {
       throw new Error('Network not properly configured. Please check your wallet connection.');
     }
     console.log('Connected to network with chainId:', network.chainId);
+    
+    // Check if we're on a supported network
+    const supportedNetworks: Record<number, string> = {
+      1: 'Ethereum Mainnet',
+      5: 'Goerli Testnet',
+      137: 'Polygon Mainnet',
+      80001: 'Mumbai Testnet',
+      50002: 'PHAROS',
+      11155111: 'Sepolia Testnet'
+    };
+    
+    if (!supportedNetworks[network.chainId]) {
+      throw new Error(`Network with chainId ${network.chainId} is not supported. Please switch to one of the following networks: ${Object.values(supportedNetworks).join(', ')}`);
+    }
 
     const signer = provider.getSigner();
     const address = await signer.getAddress();
@@ -59,6 +80,10 @@ export async function initializeRoleManager(): Promise<RoleManagerContract> {
     console.error('Role Manager initialization failed:', error);
     if (error.code === 4001) {
       throw new Error('User rejected wallet connection request');
+    } else if (error.code === -32002) {
+      throw new Error('Wallet connection request already pending. Please check your wallet and approve the connection.');
+    } else if (error.message && error.message.includes('underlying network changed')) {
+      throw new Error('Network changed during operation. Please refresh the page and try again.');
     } else if (!window.ethereum) {
       throw new Error('Web3 provider not found. Please install MetaMask');
     } else {
@@ -117,22 +142,28 @@ export async function registerAsEmployer(): Promise<void> {
   }
 }
 
-export async function registerAsEmployee(employerAddress: string): Promise<void> {
+export async function registerAsEmployee(employerAddress: string, skipEmployerCheck: boolean = false): Promise<void> {
   try {
-    console.log("employerAddress is here", employerAddress);
+    console.log("Registering as employee with employer address:", employerAddress);
     const roleManager = await initializeRoleManager();
-    const signer = await roleManager.signer.getAddress();
+    const signerAddress = await roleManager.signer.getAddress();
 
     // Validate employer address
     if (!ethers.utils.isAddress(employerAddress)) {
       throw new Error('Invalid employer address format');
     }
 
+    // Get role constants from the contract
+    const employerRole = await roleManager.EMPLOYER_ROLE();
+    const employeeRole = await roleManager.EMPLOYEE_ROLE();
+    console.log('Retrieved role constants:', { employerRole, employeeRole });
+
     // Check if already registered
     const [isEmployer, isEmployee] = await Promise.all([
-      roleManager.hasRole(EMPLOYER_ROLE, signer),
-      roleManager.hasRole(EMPLOYEE_ROLE, signer)
+      roleManager.hasRole(employerRole, signerAddress),
+      roleManager.hasRole(employeeRole, signerAddress)
     ]);
+    console.log('Role check results:', { isEmployer, isEmployee });
 
     if (isEmployee) {
       throw new Error('You are already registered as an employee');
@@ -143,33 +174,69 @@ export async function registerAsEmployee(employerAddress: string): Promise<void>
     }
 
     // Check if the provided employer is actually registered as an employer
-    const isValidEmployer = await roleManager.isEmployer(employerAddress);
-    if (!isValidEmployer) {
-      throw new Error('The provided address is not registered as an employer');
+    if (!skipEmployerCheck) {
+      const isValidEmployer = await roleManager.isEmployer(employerAddress);
+      console.log('Is valid employer check:', isValidEmployer);
+      if (!isValidEmployer) {
+        throw new Error('The provided address is not registered as an employer');
+      }
+    } else {
+      console.log('Skipping employer validation check as requested');
     }
 
     // Estimate gas with a higher limit to handle complex transactions
-    const gasEstimate = await roleManager.estimateGas.registerAsEmployee(employerAddress)
-      .catch((estimateError: any) => {
-        if (estimateError.code === 'UNPREDICTABLE_GAS_LIMIT') {
-          throw new Error('Unable to estimate gas. The transaction might fail or the employer address might be invalid.');
-        }
+    console.log('Estimating gas for transaction...');
+    let gasLimit;
+    try {
+      const gasEstimate = await roleManager.estimateGas.registerAsEmployee(employerAddress);
+      // Add 20% buffer to the estimated gas
+      gasLimit = Math.floor(gasEstimate.toNumber() * 1.2);
+      console.log('Gas estimate with buffer:', gasLimit);
+    } catch (estimateError: any) {
+      console.error('Gas estimation failed:', estimateError);
+      if (estimateError.code === 'UNPREDICTABLE_GAS_LIMIT') {
+        // Use a default gas limit if estimation fails
+        gasLimit = 500000; // Default high gas limit
+        console.log('Using default gas limit:', gasLimit);
+      } else {
         throw estimateError;
-      });
+      }
+    }
 
-    // Add 20% buffer to the estimated gas
-    const gasLimit = Math.floor(gasEstimate.toNumber() * 1.2);
-
-    const tx = await roleManager.registerAsEmployee(employerAddress);
+    // Use the gas limit in the transaction
+    console.log('Sending transaction with gas limit:', gasLimit);
+    
+    // Get the connected signer address to ensure it matches
+    const currentSignerAddress = await roleManager.signer.getAddress();
+    console.log('Signer address for transaction:', currentSignerAddress);
+    
+    // Make sure we're using the right signer for the transaction
+    console.log('Checking if we need to reconnect the signer...');
+    // Reconnect the provider and signer to ensure we have the latest state
+    const provider = new ethers.providers.Web3Provider(window.ethereum);
+    await provider.send('eth_requestAccounts', []);
+    const freshSigner = provider.getSigner();
+    const connectedAddress = await freshSigner.getAddress();
+    console.log('Connected address:', connectedAddress);
+    
+    // Create a new contract instance with the fresh signer
+    const roleManagerWithSigner = roleManager.connect(freshSigner);
+    
+    // Send the transaction with the gas limit
+    const tx = await roleManagerWithSigner.registerAsEmployee(employerAddress, { gasLimit });
     console.log('Transaction sent:', tx);
 
+    console.log('Waiting for transaction confirmation...');
     const receipt = await tx.wait();
     console.log('Transaction receipt:', receipt);
     
     if (!receipt.status) {
       throw new Error('Transaction failed during execution. Please check your wallet and try again.');
     }
+    
+    console.log('Successfully registered as employee');
   } catch (error: any) {
+    console.error('Registration error:', error);
     let errorMessage = 'Failed to register as employee';
     if (error.code === 'CALL_EXCEPTION') {
       errorMessage += ': Contract call reverted. This could be because you are already registered, the employer address is invalid, or you do not meet the requirements.';

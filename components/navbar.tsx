@@ -10,7 +10,7 @@ import { DollarSign, Menu, X, Moon, Sun, ExternalLink } from "lucide-react"
 import { useTheme } from "next-themes"
 import { useWeb3 } from "@/providers/web3-provider"
 import { useSPAYToken } from "@/hooks/use-spay-token"
-import { RoleSelectionModal } from "@/components/modals/role-selection-modal"
+import RoleSelectionModal from "./modals/role-selection-modal"
 export function Navbar() {
   const [isOpen, setIsOpen] = useState(false)
   const [mounted, setMounted] = useState(false)

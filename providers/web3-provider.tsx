@@ -4,11 +4,20 @@ import type React from "react"
 import { createContext, useContext, useEffect, useState, useCallback } from "react"
 import { toast } from "@/components/ui/use-toast"
 import { DEFAULT_CHAIN } from "@/config/blockchain"
+import { HydrationProvider, useIsClient } from "./hydration-provider"
+import authService from "@/lib/auth-service"
 
 // Define window.ethereum for TypeScript
 declare global {
   interface Window {
-    ethereum?: any
+    ethereum: {
+      isMetaMask?: boolean;
+      request: (request: { method: string; params?: any[] }) => Promise<any>;
+      on: (eventName: string, callback: (...args: any[]) => void) => void;
+      removeListener: (eventName: string, callback: (...args: any[]) => void) => void;
+      selectedAddress: string | undefined;
+      chainId: string | undefined;
+    } | undefined
   }
 }
 
@@ -40,7 +49,8 @@ const Web3Context = createContext<Web3ContextType>({
 
 export const useWeb3 = () => useContext(Web3Context)
 
-export const Web3Provider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+const Web3ProviderInner: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const isClient = useIsClient()
   const [account, setAccount] = useState<string | null>(null)
   const [chainId, setChainId] = useState<number | null>(null)
   const [isConnecting, setIsConnecting] = useState(false)
@@ -55,7 +65,7 @@ export const Web3Provider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Connect wallet
   const connectWallet = useCallback(async () => {
-    if (!window.ethereum) {
+    if (!isClient || !window.ethereum) {
       toast({
         title: "Wallet Not Found",
         description: "Please install MetaMask or another compatible wallet to use this application.",
@@ -67,13 +77,14 @@ export const Web3Provider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsConnecting(true)
 
     try {
-      // Request account access
-      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" })
+      // Use auth service to connect wallet
+      const address = await authService.connectWallet()
       const chainIdHex = await window.ethereum.request({ method: "eth_chainId" })
       const chainIdDecimal = Number.parseInt(chainIdHex, 16)
       
-      // Set authentication cookie
-      document.cookie = `auth-token=${accounts[0]}; path=/`
+      // Set account and authentication cookie
+      setAccount(address)
+      document.cookie = `auth-token=${address}; path=/`
 
       // Check if we're on Pharos Devnet (chainId 50002)
       if (chainIdDecimal !== DEFAULT_CHAIN.id) {
@@ -109,13 +120,13 @@ export const Web3Provider: React.FC<{ children: React.ReactNode }> = ({ children
       const updatedChainIdDecimal = Number.parseInt(updatedChainIdHex, 16)
 
       // Store the account address in its original format
-      setAccount(accounts[0])
+      setAccount(address)
       setChainId(updatedChainIdDecimal)
       setIsConnected(true)
 
       toast({
         title: "Wallet Connected",
-        description: `Connected to ${formatAddress(accounts[0])}`,
+        description: `Connected to ${formatAddress(address)}`,
       })
     } catch (error) {
       console.error("Failed to connect wallet:", error)
@@ -131,65 +142,69 @@ export const Web3Provider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Disconnect wallet
   const disconnectWallet = useCallback(() => {
-    setAccount(null)
-    setChainId(null)
-    setIsConnected(false)
-    setUserRole(null)
-    
-    // Clear auth cookie
-    document.cookie = 'auth-token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT;'
+    if (isClient) {
+      // Use auth service to disconnect
+      authService.disconnect()
+      
+      // Update local state
+      setAccount(null)
+      setChainId(null)
+      setIsConnected(false)
+      setUserRole(null)
+      
+      // Clear authentication cookie
+      document.cookie = "auth-token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    }
+  }, [isClient])
 
-    toast({
-      title: "Wallet Disconnected",
-      description: "Your wallet has been disconnected.",
-    })
-  }, [])
-
-  // Listen for account and chain changes
+  // Initialize provider and set up event listeners
   useEffect(() => {
-    if (window.ethereum) {
-      const handleAccountsChanged = (accounts: string[]) => {
-        if (accounts.length === 0) {
-          // User disconnected their wallet
-          disconnectWallet()
-        } else if (accounts[0] !== account) {
-          // User switched accounts
-          setAccount(accounts[0])
-          toast({
-            title: "Account Changed",
-            description: `Switched to ${formatAddress(accounts[0])}`,
-          })
-        }
+    if (!window.ethereum || !isClient) return
+
+    // Use auth service to set up event listeners
+    const cleanup = authService.setupEventListeners((event, data) => {
+      if (event === 'disconnected') {
+        // User disconnected their wallet
+        disconnectWallet()
+      } else if (event === 'accountChanged' && data) {
+        // User switched accounts
+        setAccount(data)
+        setIsConnected(true)
+      } else if (event === 'networkChanged') {
+        // Chain changed, refresh the page to avoid state inconsistencies
+        window.location.reload()
       }
+    })
 
-      const handleChainChanged = (chainIdHex: string) => {
-        const newChainId = Number.parseInt(chainIdHex, 16)
-        setChainId(newChainId)
-
-        // Check if we're on XDC Testnet
-        if (newChainId !== DEFAULT_CHAIN.id) {
-          toast({
-            title: "Network Changed",
-            description: `Please switch to ${DEFAULT_CHAIN.name} to use this application.`,
-            variant: "destructive",
-          })
-        } else {
-          toast({
-            title: "Network Changed",
-            description: `Connected to ${DEFAULT_CHAIN.name}`,
-          })
+    // Check if already connected
+    const checkConnection = async () => {
+      try {
+        const isConnected = await authService.isWalletConnected()
+        if (isConnected) {
+          const address = await authService.getCurrentAddress()
+          const chainIdHex = await window.ethereum.request({ method: "eth_chainId" })
+          const chainIdDecimal = Number.parseInt(chainIdHex, 16)
+          
+          if (address) {
+            setAccount(address)
+            setChainId(chainIdDecimal)
+            setIsConnected(true)
+            
+            // Check user role
+            const { role } = await authService.checkUserRole(address)
+            setUserRole(role)
+          }
         }
-      }
-
-      window.ethereum.on("accountsChanged", handleAccountsChanged)
-      window.ethereum.on("chainChanged", handleChainChanged)
-
-      return () => {
-        window.ethereum.removeListener("accountsChanged", handleAccountsChanged)
-        window.ethereum.removeListener("chainChanged", handleChainChanged)
+      } catch (error) {
+        console.error("Error checking connection:", error)
       }
     }
-  }, [account, disconnectWallet, formatAddress])
+
+    checkConnection()
+
+    // Clean up event listeners
+    return cleanup
+  }, [disconnectWallet, isClient])
 
   // View address on block explorer
   const viewOnExplorer = useCallback(() => {
@@ -212,5 +227,18 @@ export const Web3Provider: React.FC<{ children: React.ReactNode }> = ({ children
     setUserRole,
   }
 
-  return <Web3Context.Provider value={value}>{children}</Web3Context.Provider>
+  return (
+    <Web3Context.Provider value={value}>
+      {children}
+    </Web3Context.Provider>
+  )
+}
+
+// Export the wrapped provider that handles hydration
+export const Web3Provider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  return (
+    <HydrationProvider>
+      <Web3ProviderInner>{children}</Web3ProviderInner>
+    </HydrationProvider>
+  )
 }
