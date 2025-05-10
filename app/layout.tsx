@@ -11,7 +11,16 @@ const inter = Inter({ subsets: ["latin"] })
 export const metadata: Metadata = {
   title: "StablePay ETF",
   description: "A blockchain-based payroll platform using a stablecoin backed by gold, BTC, and ETH ETFs",
-    generator: 'v0.dev'
+  generator: 'v0.dev',
+  icons: {
+    icon: '/favicon.svg',
+    shortcut: '/favicon.svg',
+    apple: '/favicon.svg',
+    other: {
+      rel: 'mask-icon',
+      url: '/favicon.svg'
+    }
+  }
 }
 
 export default function RootLayout({

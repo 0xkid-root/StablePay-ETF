@@ -4,10 +4,8 @@ import { useState } from "react"
 import { useWeb3 } from "@/providers/web3-provider"
 import { toast } from "@/components/ui/use-toast"
 import { ethers } from "ethers"
-import RoleManagerABI from "@/WEB3/abis/RoleManager.json"
 import PayrollProcessorABI from "@/WEB3/abis/PayrollProcessor.json"
 import { CONTRACT_ADDRESSES } from "@/config/blockchain"
-const  ROLE_MANAGER_CONTRACT = CONTRACT_ADDRESSES.ROLE_MANAGER_CONTRACT
 const PAYROLL_PROCESSOR = CONTRACT_ADDRESSES.PAYROLL_PROCESSOR
 
 export function usePayrollProcessor() {
@@ -65,13 +63,10 @@ export function usePayrollProcessor() {
       const signer = await provider.getSigner()
 
       // First register the employee role
-      const roleManager = new ethers.Contract(ROLE_MANAGER_CONTRACT, RoleManagerABI, signer)
-      const registerTx = await roleManager.registerAsEmployee(await signer.getAddress())
-      await registerTx.wait()
 
       // Then set up their payroll schedule
       const payrollProcessor = new ethers.Contract(PAYROLL_PROCESSOR, PayrollProcessorABI, signer)
-      const scheduleTx = await payrollProcessor.setEmployeePayroll(employee, ethers.utils.parseEther(amount), interval)
+      const scheduleTx = await payrollProcessor.setPayrollSchedule(employee, ethers.utils.parseEther(amount), interval)
       await scheduleTx.wait()
 
       toast({
